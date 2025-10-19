@@ -9,61 +9,296 @@ app.get("/", (req, res) => res.sendFile(__dirname + "/public/index.html"));
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
-// roomId -> [ws, ws, ...]
+// ------------------------ Game Helpers ------------------------
+const RANKS = ["2","3","4","5","6","7","8","9","10","J","Q","K","A"];
+const SUITS = ["H","D","C","S"]; // display with ♥♦♣♠ on client
+const ROUND_SIZES = [7,6,5,4,3,2,1,1,2,3,4,5,6,7];
+const TRUMP_ORDER = ["H","C","D","S","NT"]; // Hearts, Clubs, Diamonds, Spades, No-Trump
+
+function newDeck(){
+  const deck=[];
+  for (const s of SUITS) for (const r of RANKS) deck.push(r+s);
+  // Fisher–Yates
+  for (let i=deck.length-1;i>0;i--){
+    const j=Math.floor(Math.random()*(i+1));
+    [deck[i],deck[j]]=[deck[j],deck[i]];
+  }
+  return deck;
+}
+function rankValue(card){ return RANKS.indexOf(card.slice(0,-1)); }
+function cardSuit(card){ return card.slice(-1); }
+function cardWins(a,b,lead,trump){
+  const sa=cardSuit(a), sb=cardSuit(b);
+  if (sa===sb) return rankValue(a)>rankValue(b);
+  if (trump!=="NT"){
+    if (sa===trump && sb!==trump) return true;
+    if (sb===trump && sa!==trump) return false;
+  }
+  if (sa===lead && sb!==lead) return true;
+  return false;
+}
+function rotateToFirst(list, firstId){
+  const i=list.indexOf(firstId);
+  if (i<=0) return list.slice();
+  return list.slice(i).concat(list.slice(0,i));
+}
+
+// ------------------------ Room / Game State ------------------------
+/*
+rooms = {
+  [roomId]: {
+    nameById: {wsId: "Alice"...},
+    sockets: [ws, ws, ...],
+    game: {
+      phase: "lobby"|"bidding"|"playing"|"finished",
+      dealerIndex: 0,
+      roundIndex: 0, // 0..ROUND_SIZES.length-1
+      trump: "H"|"C"|"D"|"S"|"NT",
+      players: [ {id, name}, ... ] (seating order),
+      hands: { playerId: [card,..] },
+      bids:  { playerId: number },
+      bidOrder: [playerId,...],
+      bidIndex: 0,
+      turnOrder: [playerId,...],
+      turnIndex: 0,
+      currentTrick: [ {playerId, card}, ... ],
+      tricksWon: { playerId: number },
+      scores: { playerId: number },
+      history: [ per-round results ],
+      nextRoundLeaderId: null
+    }
+  }
+}
+*/
 const rooms = {};
 
-function broadcastToRoom(roomId, payload) {
-  const list = rooms[roomId] || [];
-  const data = JSON.stringify(payload);
-  for (const client of list) {
-    if (client.readyState === WebSocket.OPEN) client.send(data);
+function broadcast(roomId, payload){
+  const r = rooms[roomId]; if (!r) return;
+  const msg = JSON.stringify(payload);
+  for (const ws of r.sockets) {
+    if (ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
+}
+function sendRoomState(roomId){
+  const r = rooms[roomId]; if (!r) return;
+  const g = r.game;
+  const safe = {
+    type: "state",
+    phase: g.phase,
+    players: g.players.map(p=>({id:p.id, name:p.name})),
+    dealerIndex: g.dealerIndex,
+    roundIndex: g.roundIndex,
+    roundSize: ROUND_SIZES[g.roundIndex],
+    trump: g.trump,
+    bids: g.bids,
+    tricksWon: g.tricksWon,
+    scores: g.scores,
+    currentTrick: g.currentTrick,
+    turnOrder: g.turnOrder,
+    turnIndex: g.turnIndex,
+    history: g.history
+  };
+  // each player gets their own hand only
+  for (const ws of r.sockets){
+    if (ws.readyState!==WebSocket.OPEN) continue;
+    const hand = g.hands[ws.pid] || [];
+    ws.send(JSON.stringify({...safe, me: ws.pid, hand}));
   }
 }
 
-wss.on("connection", (ws) => {
-  ws.room = null;
-  ws.name = "Player";
+function ensureRoom(roomId){
+  rooms[roomId] ||= { sockets: [], nameById:{}, game: null };
+}
+function addSocketToRoom(ws, roomId){
+  ensureRoom(roomId);
+  const r = rooms[roomId];
+  if (!r.sockets.includes(ws)) r.sockets.push(ws);
+}
 
-  ws.on("message", (msg) => {
-    try {
-      const data = JSON.parse(msg);
+function initGame(roomId){
+  const r = rooms[roomId]; if (!r) return;
+  const players = r.sockets
+    .filter(s => s.roomId===roomId)
+    .map((s,i)=>({id:s.pid, name: s.playerName || `Player${i+1}`}));
+  if (players.length < 3 || players.length > 6) {
+    broadcast(roomId, {type: "chat", sender:"System", text:"Need 3 to 6 players to start."});
+    return;
+  }
+  r.game = {
+    phase: "lobby",
+    dealerIndex: 0,
+    roundIndex: 0,
+    trump: TRUMP_ORDER[0],
+    players,
+    hands: {},
+    bids: {},
+    bidOrder: [],
+    bidIndex: 0,
+    turnOrder: [],
+    turnIndex: 0,
+    currentTrick: [],
+    tricksWon: {},
+    scores: Object.fromEntries(players.map(p=>[p.id,0])),
+    history: [],
+    nextRoundLeaderId: null
+  };
+}
 
-      // join a room
-      if (data.type === "join") {
-        ws.room = String(data.room || "").toUpperCase();
-        ws.name = String(data.name || "Player");
-        rooms[ws.room] ||= [];
-        rooms[ws.room].push(ws);
-
-        // notify just this user they joined
-        ws.send(JSON.stringify({ type: "system", text: `Joined room ${ws.room}` }));
-        // announce to room
-        broadcastToRoom(ws.room, { type: "chat", sender: "System", text: `${ws.name} joined.` });
-      }
-
-      // chat to room
-      if (data.type === "chat" && ws.room) {
-        broadcastToRoom(ws.room, { type: "chat", sender: data.sender || ws.name, text: data.text || "" });
-      }
-
-      // start game signal
-      if (data.type === "start" && ws.room) {
-        broadcastToRoom(ws.room, { type: "start", sender: data.sender || ws.name });
-      }
-
-    } catch (e) {
-      console.error("Bad message:", e);
+function startRound(roomId){
+  const r = rooms[roomId]; if (!r || !r.game) return;
+  const g = r.game;
+  const deck = newDeck();
+  const size = ROUND_SIZES[g.roundIndex];
+  g.hands = Object.fromEntries(g.players.map(p=>[p.id,[]]));
+  // deal starting to left of dealer
+  const startSeat = (g.dealerIndex+1) % g.players.length;
+  for (let i=0;i<size;i++){
+    for (let j=0;j<g.players.length;j++){
+      const p = g.players[(startSeat+j)%g.players.length];
+      g.hands[p.id].push(deck.pop());
     }
-  });
+  }
+  g.trump = TRUMP_ORDER[g.roundIndex % TRUMP_ORDER.length];
+  g.bids = {};
+  g.tricksWon = {};
+  g.currentTrick = [];
+  g.bidOrder = g.players.map(p=>p.id);
+  // left of dealer bids first
+  g.bidOrder = rotateToFirst(g.bidOrder, g.players[startSeat].id);
+  g.bidIndex = 0;
+  // leader for play phase will be set after bidding; initial leader is left of dealer
+  g.turnOrder = g.players.map(p=>p.id);
+  g.turnOrder = rotateToFirst(g.turnOrder, g.players[startSeat].id);
+  g.turnIndex = 0;
+  g.phase = "bidding";
+  broadcast(roomId,{type:"chat", sender:"System", text:`Round ${g.roundIndex+1}: ${size} cards, trump ${g.trump==='NT'?'No-Trump':g.trump}`});
+  sendRoomState(roomId);
+}
 
-  ws.on("close", () => {
-    if (ws.room && rooms[ws.room]) {
-      rooms[ws.room] = rooms[ws.room].filter((c) => c !== ws);
-      broadcastToRoom(ws.room, { type: "chat", sender: "System", text: `${ws.name} left.` });
-      if (rooms[ws.room].length === 0) delete rooms[ws.room];
+function finalizeTrick(roomId){
+  const r = rooms[roomId]; if (!r || !r.game) return;
+  const g = r.game;
+  const leadSuit = cardSuit(g.currentTrick[0].card);
+  let winner = g.currentTrick[0].playerId;
+  let best = g.currentTrick[0].card;
+  for (let i=1;i<g.currentTrick.length;i++){
+    const it = g.currentTrick[i];
+    if (cardWins(it.card, best, leadSuit, g.trump)){ best = it.card; winner = it.playerId; }
+  }
+  g.tricksWon[winner] = (g.tricksWon[winner]||0)+1;
+  g.currentTrick = [];
+  // winner leads next trick
+  g.turnOrder = rotateToFirst(g.turnOrder, winner);
+  g.turnIndex = 0;
+  broadcast(roomId,{type:"chat", sender:"System", text:`${rooms[roomId].nameById[winner]||'A player'} won the trick.`});
+}
+
+function finishRound(roomId){
+  const r = rooms[roomId]; if (!r || !r.game) return;
+  const g = r.game;
+  // scoring: exact = 10 + bid, else = tricksWon
+  const delta={}, totals={};
+  for (const p of g.players){
+    const id=p.id;
+    const won=g.tricksWon[id]||0;
+    const bid=(g.bids[id]??0);
+    const add = (won===bid) ? (10+won) : won;
+    g.scores[id] = (g.scores[id]||0) + add;
+    delta[id]=add; totals[id]=g.scores[id];
+  }
+  g.history.push({
+    round: g.roundIndex+1,
+    cards: ROUND_SIZES[g.roundIndex],
+    trump: g.trump,
+    bids: {...g.bids},
+    won: {...g.tricksWon},
+    delta, totals
+  });
+  // next round setup
+  g.dealerIndex = (g.dealerIndex+1)%g.players.length;
+  g.roundIndex++;
+  if (g.roundIndex < ROUND_SIZES.length){
+    startRound(roomId);
+  } else {
+    g.phase="finished";
+    broadcast(roomId,{type:"chat", sender:"System", text:"Game finished!"});
+    sendRoomState(roomId);
+  }
+}
+
+// ------------------------ WebSocket Handlers ------------------------
+wss.on("connection",(ws)=>{
+  ws.pid = Math.random().toString(36).slice(2,10).toUpperCase();
+  ws.playerName = "Player";
+  ws.roomId = null;
+
+  ws.on("message",(raw)=>{
+    let data; try{ data = JSON.parse(raw); } catch { return; }
+
+    // Join
+    if (data.type==="join"){
+      const roomId = String(data.room||"").toUpperCase();
+      ws.roomId = roomId;
+      ws.playerName = String(data.name||"Player").slice(0,24);
+      ensureRoom(roomId);
+      rooms[roomId].nameById[ws.pid]=ws.playerName;
+      addSocketToRoom(ws, roomId);
+      ws.send(JSON.stringify({type:"system", text:`Joined room ${roomId}`}));
+      broadcast(roomId,{type:"chat", sender:"System", text:`${ws.playerName} joined.`});
+      // if game exists, just sync; else wait until start
+      if (rooms[roomId].game){
+        sendRoomState(roomId);
+      }
+      return;
     }
-  });
-});
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+    // Chat
+    if (data.type==="chat" && ws.roomId){
+      broadcast(ws.roomId, {type:"chat", sender: ws.playerName, text: String(data.text||"")});
+      return;
+    }
+
+    // Start (creates a new game if none; else ignored)
+    if (data.type==="start" && ws.roomId){
+      if (!rooms[ws.roomId].game) {
+        initGame(ws.roomId);
+      }
+      const g = rooms[ws.roomId].game;
+      if (g && g.phase==="lobby"){
+        broadcast(ws.roomId,{type:"start", sender: ws.playerName});
+        startRound(ws.roomId);
+      }
+      return;
+    }
+
+    // Bid
+    if (data.type==="bid" && ws.roomId){
+      const roomId = ws.roomId, r=rooms[roomId], g=r?.game; if (!g || g.phase!=="bidding") return;
+      const playerId = data.playerId, bid = data.bid|0;
+      const expected = g.bidOrder[g.bidIndex];
+      if (playerId!==expected) return;
+      const total = ROUND_SIZES[g.roundIndex];
+      if (bid<0 || bid>total) return;
+      // dealer cannot make total bids == total
+      const dealerId = g.players[g.dealerIndex].id;
+      const currentSum = Object.values(g.bids).reduce((a,b)=>a+(b??0),0);
+      const isDealer = (playerId===dealerId);
+      if (isDealer && currentSum + bid === total) return; // invalid
+      g.bids[playerId]=bid;
+      g.bidIndex++;
+      if (g.bidIndex>=g.players.length){
+        // bidding done -> playing
+        g.phase="playing";
+        // leader is left of dealer for first trick (already set in turnOrder)
+        broadcast(roomId,{type:"chat", sender:"System", text:"Bidding complete. Play!"});
+      }
+      sendRoomState(roomId);
+      return;
+    }
+
+    // Play a card
+    if (data.type==="play" && ws.roomId){
+      const roomId=ws.roomId, r=rooms[roomId], g=r?.game; if(!g || g.phase!=="playing") return;
+      const playerId=data.playerId, card=data.card;
+      const expected = g.turnOrder[g.turnIndex];
+      if (playerId!==expected) return;
