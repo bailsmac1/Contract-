@@ -4,52 +4,64 @@ const WebSocket = require("ws");
 
 const app = express();
 app.use(express.static("public"));
-app.get("/", (req, res) => {
-  res.sendFile(__dirname + "/public/index.html");
-});
+app.get("/", (req, res) => res.sendFile(__dirname + "/public/index.html"));
 
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
 
+// roomId -> [ws, ws, ...]
 const rooms = {};
 
+function broadcastToRoom(roomId, payload) {
+  const list = rooms[roomId] || [];
+  const data = JSON.stringify(payload);
+  for (const client of list) {
+    if (client.readyState === WebSocket.OPEN) client.send(data);
+  }
+}
+
 wss.on("connection", (ws) => {
-  console.log("Client connected");
+  ws.room = null;
+  ws.name = "Player";
 
-  ws.on("message", (message) => {
+  ws.on("message", (msg) => {
     try {
-      const data = JSON.parse(message);
+      const data = JSON.parse(msg);
 
-      // When someone joins a room
+      // join a room
       if (data.type === "join") {
-        ws.room = data.room;
-        if (!rooms[ws.room]) rooms[ws.room] = [];
+        ws.room = String(data.room || "").toUpperCase();
+        ws.name = String(data.name || "Player");
+        rooms[ws.room] ||= [];
         rooms[ws.room].push(ws);
-        console.log(`Client joined room ${ws.room}`);
+
+        // notify just this user they joined
+        ws.send(JSON.stringify({ type: "system", text: `Joined room ${ws.room}` }));
+        // announce to room
+        broadcastToRoom(ws.room, { type: "chat", sender: "System", text: `${ws.name} joined.` });
       }
 
-      // When someone sends a chat message
-      if (data.type === "chat" && ws.room && rooms[ws.room]) {
-        rooms[ws.room].forEach(client => {
-          if (client.readyState === WebSocket.OPEN) {
-            client.send(JSON.stringify({
-              type: "chat",
-              sender: data.sender,
-              text: data.text
-            }));
-          }
-        });
+      // chat to room
+      if (data.type === "chat" && ws.room) {
+        broadcastToRoom(ws.room, { type: "chat", sender: data.sender || ws.name, text: data.text || "" });
       }
-    } catch (err) {
-      console.error("Error handling message:", err);
+
+      // start game signal
+      if (data.type === "start" && ws.room) {
+        broadcastToRoom(ws.room, { type: "start", sender: data.sender || ws.name });
+      }
+
+    } catch (e) {
+      console.error("Bad message:", e);
     }
   });
 
   ws.on("close", () => {
     if (ws.room && rooms[ws.room]) {
-      rooms[ws.room] = rooms[ws.room].filter(c => c !== ws);
+      rooms[ws.room] = rooms[ws.room].filter((c) => c !== ws);
+      broadcastToRoom(ws.room, { type: "chat", sender: "System", text: `${ws.name} left.` });
+      if (rooms[ws.room].length === 0) delete rooms[ws.room];
     }
-    console.log("Client disconnected");
   });
 });
 
