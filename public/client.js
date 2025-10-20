@@ -1,40 +1,112 @@
-// -------- CONTRACT — 3–6 players, 7→1→7, H→C→D→S→NT, bidding, play, scoring --------
+// public/client.js
 
-// Simple UI
-document.body.innerHTML = `
-  <div style="max-width:980px;margin:16px auto;padding:12px;color:#fff;font-family:system-ui">
-    <h1 style="margin:0 0 8px">桜アーケード — Contract</h1>
-    <div style="margin-bottom:8px">
-      <button id="btnCreate" style="margin-right:6px;padding:8px 12px;border:0;border-radius:10px;background:#ff5aa7;color:#fff;font-weight:600">Create room</button>
-      <button id="btnJoin"   style="margin-right:6px;padding:8px 12px;border:0;border-radius:10px;background:#6b5bff;color:#fff;font-weight:600">Join room</button>
-      <button id="btnStart"  style="padding:8px 12px;border:0;border-radius:10px;background:#25d0a4;color:#000;font-weight:700">Start</button>
-    </div>
-    <div id="info" style="margin:6px 0"></div>
+let ws;
+let roomId = null;
+let playerName = null;
 
-    <div id="top" style="display:flex;gap:10px;flex-wrap:wrap">
-      <div id="players" style="flex:1;min-width:260px;background:rgba(255,255,255,.06);padding:8px;border-radius:10px"></div>
-      <div id="scores" style="flex:1;min-width:260px;background:rgba(255,255,255,.06);padding:8px;border-radius:10px"></div>
-    </div>
+const chatBox = document.getElementById("chat");
+const chatInput = document.getElementById("chatInput");
+const playersDiv = document.getElementById("players");
+const statusDiv = document.getElementById("status");
+const startButton = document.getElementById("startButton");
+const joinButton = document.getElementById("joinButton");
+const createButton = document.getElementById("createButton");
 
-    <div id="bidding" style="margin-top:10px;background:rgba(255,255,255,.06);padding:8px;border-radius:10px"></div>
-    <div id="table"   style="margin-top:10px;background:rgba(255,255,255,.06);padding:8px;border-radius:10px"></div>
-    <div id="hand"    style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"></div>
+function logChat(message) {
+  const p = document.createElement("p");
+  p.textContent = message;
+  chatBox.appendChild(p);
+  chatBox.scrollTop = chatBox.scrollHeight;
+}
 
-    <h3>Chat</h3>
-    <div id="chat" style="height:160px;overflow:auto;padding:8px;background:rgba(255,255,255,.06);border-radius:10px"></div>
-    <div style="margin-top:6px">
-      <input id="chatInput" placeholder="Message…" style="width:70%;padding:8px;border-radius:8px;border:0;margin-right:6px"/>
-      <button id="chatSend" style="padding:8px 12px;border:0;border-radius:8px;background:#7c5cff;color:#fff">Send</button>
-    </div>
-  </div>
-`;
+function updatePlayers(list) {
+  playersDiv.innerHTML = "";
+  list.forEach((name) => {
+    const li = document.createElement("p");
+    li.textContent = name;
+    playersDiv.appendChild(li);
+  });
+}
 
-const $ = (s)=>document.querySelector(s);
-const info = $("#info");
-const playersEl = $("#players");
-const scoresEl  = $("#scores");
-const biddingEl = $("#bidding");
-const tableEl   = $("#table");
-const handEl    = $("#hand");
-const chatEl    = $("#chat");
-const chatInput
+function connectWS() {
+  ws = new WebSocket(
+    (location.protocol === "https:" ? "wss://" : "ws://") + location.host
+  );
+
+  ws.onopen = () => {
+    logChat("Connected to server.");
+  };
+
+  ws.onmessage = (event) => {
+    const data = JSON.parse(event.data);
+    switch (data.type) {
+      case "hello":
+        logChat(data.message);
+        break;
+      case "joined":
+        logChat(`Joined room ${data.roomId} as ${data.you}.`);
+        break;
+      case "chat":
+        logChat(`${data.from}: ${data.text}`);
+        break;
+      case "system":
+        logChat(`[SYSTEM] ${data.message}`);
+        break;
+      case "roster":
+        updatePlayers(data.players);
+        break;
+      case "error":
+        logChat(`⚠️ ${data.message}`);
+        break;
+      case "started":
+        logChat(`🎴 ${data.message}`);
+        statusDiv.textContent = "Game Started!";
+        break;
+      default:
+        console.log("Unknown message", data);
+    }
+  };
+
+  ws.onclose = () => {
+    logChat("Disconnected from server.");
+  };
+}
+
+// Create Room
+createButton.onclick = () => {
+  const randomId = Math.random().toString(36).substring(2, 7).toUpperCase();
+  roomId = randomId;
+  playerName = prompt("Enter your name:", "Player") || "Player";
+  ws.send(JSON.stringify({ type: "join", roomId, name: playerName }));
+  document.getElementById("roomIdDisplay").textContent = `Room: ${roomId}`;
+};
+
+// Join Room
+joinButton.onclick = () => {
+  const inputId = prompt("Enter Room ID:").trim().toUpperCase();
+  if (!inputId) return alert("Room ID required.");
+  roomId = inputId;
+  playerName = prompt("Enter your name:", "Player") || "Player";
+  ws.send(JSON.stringify({ type: "join", roomId, name: playerName }));
+  document.getElementById("roomIdDisplay").textContent = `Room: ${roomId}`;
+};
+
+// Start Game
+startButton.onclick = () => {
+  if (!roomId) return alert("Join or create a room first!");
+  ws.send(JSON.stringify({ type: "start" }));
+};
+
+// Send Chat
+function sendChat() {
+  const text = chatInput.value.trim();
+  if (!text || !roomId) return;
+  ws.send(JSON.stringify({ type: "chat", text }));
+  chatInput.value = "";
+}
+document.getElementById("sendButton").onclick = sendChat;
+chatInput.addEventListener("keypress", (e) => {
+  if (e.key === "Enter") sendChat();
+});
+
+connectWS();
