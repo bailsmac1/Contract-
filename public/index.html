@@ -1,13 +1,120 @@
-<div id="roomIdDisplay"></div>
-<div id="players"></div>
-<div id="status"></div>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>🌸 桜アーケード — Sakura Arcade</title>
+  <style>
+    body {
+      background: radial-gradient(circle at center, #12061f 0%, #09040f 100%);
+      font-family: "Segoe UI", Arial, sans-serif;
+      color: white;
+      text-align: center;
+      margin: 0;
+      padding: 0;
+    }
 
-<button id="createButton">Create Room</button>
-<button id="joinButton">Join Room</button>
-<button id="startButton">Start</button>
+    h1 {
+      font-size: 1.8rem;
+      margin-top: 20px;
+      color: #ffb6d6;
+    }
 
-<div id="chat" class="chat"></div>
-<input id="chatInput" placeholder="Message..." />
-<button id="sendButton">Send</button>
+    .panel {
+      background: rgba(30, 20, 50, 0.8);
+      border-radius: 20px;
+      box-shadow: 0 0 15px rgba(255, 182, 230, 0.3);
+      padding: 20px;
+      margin: 20px auto;
+      width: 90%;
+      max-width: 500px;
+    }
 
-<script src="client.js"></script>
+    button {
+      background: #ff4fa6;
+      border: none;
+      border-radius: 10px;
+      color: white;
+      padding: 10px 18px;
+      margin: 5px;
+      font-size: 1rem;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+
+    button:hover {
+      background: #ff77c7;
+    }
+
+    #chat {
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      padding: 10px;
+      height: 180px;
+      overflow-y: auto;
+      text-align: left;
+    }
+
+    #players {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      color: #ffb6d6;
+    }
+
+    input {
+      border-radius: 8px;
+      padding: 8px;
+      border: none;
+      margin-right: 8px;
+      width: 60%;
+    }
+
+    #sendButton {
+      background: #b67fff;
+    }
+
+    #sendButton:hover {
+      background: #caa4ff;
+    }
+
+    #status {
+      margin-top: 10px;
+      font-weight: bold;
+      color: #b6aaff;
+    }
+
+    #roomIdDisplay {
+      color: #77ffcc;
+      font-weight: bold;
+      margin-top: 5px;
+    }
+  </style>
+</head>
+<body>
+  <h1>🌸 桜アーケード — Sakura Arcade</h1>
+
+  <div class="panel">
+    <button id="createButton">Create Room</button>
+    <button id="joinButton">Join Room</button>
+    <button id="startButton">Start</button>
+    <div id="status"></div>
+    <div id="roomIdDisplay"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Players</h3>
+    <div id="players"></div>
+  </div>
+
+  <div class="panel">
+    <h3>Chat</h3>
+    <div id="chat"></div>
+    <div style="margin-top: 8px;">
+      <input id="chatInput" placeholder="Type a message..." />
+      <button id="sendButton">Send</button>
+    </div>
+  </div>
+
+  <script src="client.js"></script>
+</body>
+</html>
